@@ -39,5 +39,3 @@ Team
 ----
 
 - **Author**: Chris Beavers [@cbeav](https://github.com/cbeav)
-- **Contributors**:
-  - Greg Brandt [@brandtg](https://github.com/brandtg)
