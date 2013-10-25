@@ -1,27 +1,34 @@
 {-# LANGUAGE OverloadedStrings #-}
 {- |
 
-This module sets up a storage node on a specified port. The node is capable
-of handling GET, POST, and DELETE requests against an HTTP path of the form
-/db/table/key1[/subkeys].
+This module houses the storage layer of PureDB. It sets up a storage node on
+a specified port, which handles GET, POST, and DELETE requests against an
+HTTP path of the form /db/table/key1[/subkeys].
 
 Maintainer: Chris Beavers <crbeavers@gmail.com>
 
 -} 
 module StorageNode (main) where
 
-import Blaze.ByteString.Builder.Char8 as B
+import qualified Blaze.ByteString.Builder.Char8 as B
+import Control.Monad (liftM)
 import Control.Monad.Trans (liftIO)
+import Control.Monad.Trans.Resource (runResourceT, transResourceT)
+import qualified Data.ByteString.Char8 as B
+import qualified Data.ByteString.Lazy.Char8 as BL
+import Data.Conduit.Lazy (lazyConsume)
+import Data.Monoid
 import qualified Database.HDBC as HDBC
 import qualified Database.HDBC.MySQL as HDBC
 import qualified Data.Text as T
 import Network.Wai
 import Network.Wai.Handler.Warp
-import Network.Wai.Parse (parseRequestBody, lbsBackEnd)
 import Network.HTTP.Types
 
+import Data.Text.Encoding (encodeUtf8)
+
 -- | Key record type to provide convenient access to heirarchical information.
-data Key = Key {db :: T.Text, table :: T.Text, keys :: [T.Text]} deriving (Show)
+data Key = Key {db :: B.ByteString, table :: B.ByteString, keys :: [B.ByteString]} deriving (Show)
 parseKey (d:t:k) = Key {db=d, table=t, keys=k}
 
 -- | Starts server on local port.
@@ -30,14 +37,14 @@ main = do
     putStrLn $ "Listening on port " ++ show port
     run port app
 
-getStatement table = "SELECT * FROM `" ++ (T.unpack table) ++ "` WHERE k=?;"
-deleteStatement table = "DELETE FROM `" ++ (T.unpack table) ++ "` WHERE k=?;"
-upsertStatement table = "UPDATE `" ++ (T.unpack table) ++ "` SET v=? WHERE k=?;"
+getStatement table = "SELECT * FROM `" ++ (B.unpack table) ++ "` WHERE k=?;"
+deleteStatement table = "DELETE FROM `" ++ (B.unpack table) ++ "` WHERE k=?;"
+upsertStatement table = "UPDATE `" ++ (B.unpack table) ++ "` SET v=? WHERE k=?;"
 
 dbconn db = HDBC.connectMySQL HDBC.defaultMySQLConnectInfo {
                         HDBC.mysqlHost     = "localhost",
                         HDBC.mysqlUser     = "root",
-                        HDBC.mysqlDatabase = T.unpack db,
+                        HDBC.mysqlDatabase = B.unpack db,
                         HDBC.mysqlUnixSocket = "/tmp/mysql.sock"
                       }
 
@@ -45,13 +52,13 @@ dbconn db = HDBC.connectMySQL HDBC.defaultMySQLConnectInfo {
 app :: Application
 app req =
    do
-    (params, _) <- parseRequestBody lbsBackEnd req
-    let key  = parseKey $ pathInfo req
+    body <- lazyConsume . requestBody $ req
+    let key  = parseKey $ map encodeUtf8 $ pathInfo req
     liftIO $
      case requestMethod req of
         "GET"    -> get key
         "DELETE" -> delete key
-        "POST"   -> post key params
+        "POST"   -> post key body
         --_        -> return $ ResponseBuilder status500 [("Content-Type", "text/plain")] $ B.fromText "Unsupported request type"
 
 -- | Leverages HDBC to fetch a key.
@@ -78,10 +85,11 @@ delete key = do
     return $ ResponseBuilder status204 [("Content-Type", "text/plain")] $ B.fromText $ "204: No content"
 
 -- | Leverages HDBC to perform an upsert.
---post :: Key -> IO Response
-post key params = do
+post :: Key -> [B.ByteString] -> IO Response
+post key body = do
     conn <- dbconn $ db key
-    HDBC.run conn (upsertStatement $ table key) [HDBC.toSql $ T.pack $ show params, HDBC.toSql $ head $ keys key]
+    let bodyBytes = mconcat body
+    HDBC.run conn (upsertStatement $ table key) [HDBC.toSql $ bodyBytes, HDBC.toSql $ head $ keys key]
     HDBC.commit conn
     HDBC.disconnect conn
     return $ ResponseBuilder status201 [("Content-Type", "text/plain")] $ B.fromText $ "201: Created"
